@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "vox_client",
+  "version": "${version}",
+  "name": "Vox Client",
+  "description": "Optional client extras for Vox Launcher: FPS and CPS counters, keystrokes, coordinates and a zoom key. Client-side only.",
+  "authors": ["Vox Launcher"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": { "client": ["dev.vox.client.VoxClient"] },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~${minecraft}",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

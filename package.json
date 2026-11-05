@@ -1,0 +1,20 @@
+{
+  "name": "vox-launcher",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Vox Launcher: a fast Minecraft: Java Edition launcher (Rust + Tauri)",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "sylphiras",
+  "repository": "github:sylphiras/vox-launcher",
+  "scripts": {
+    "build:web": "node scripts/build-web.js",
+    "tauri": "tauri",
+    "dev": "npm run build:web && tauri dev",
+    "build": "npm run build:web && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "^5",
+    "esbuild": "^0.24.0"
+  }
+}
