@@ -178,7 +178,7 @@ See [DEVELOPING.md](DEVELOPING.md).
 
 <p align="center">
   <sub>
-    Copyright © 2026 sylphiras. All rights reserved, see <a href="LICENSE">LICENSE</a>.<br>
+    Copyright © 2026 sylphiras. All rights reserved, see <a href="LICENSE.md">LICENSE</a>.<br>
     Vox Launcher is not affiliated with Mojang Studios or Microsoft. Minecraft is a trademark of Mojang Studios.
   </sub>
 </p>
