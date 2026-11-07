@@ -47,6 +47,11 @@
         "installerIcon": "icons/icon.ico",
         "displayLanguageSelector": false
       }
-    }
+    },
+    "publisher": "Sylphira",
+    "copyright": "Copyright (c) Sylphira. All rights reserved.",
+    "shortDescription": "Vox Launcher - a Minecraft: Java Edition launcher",
+    "longDescription": "Vox Launcher is a fast launcher for Minecraft: Java Edition with instances, mods, modpacks, skins and more. Not affiliated with Mojang or Microsoft.",
+    "homepage": "https://github.com/sylphiras/vox-launcher"
   }
 }
