@@ -7,6 +7,7 @@
 <p align="center">
   A fast, good-looking launcher for Minecraft: Java Edition.<br>
   Manage as many instances as you like, install mods and modpacks in a click, and get playing quickly.
+  Code signing is provided by SignPath.io, certificate by SignPath Foundation
 </p>
 
 <p align="center">
