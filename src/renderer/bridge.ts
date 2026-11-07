@@ -1,6 +1,6 @@
 // Connects the UI to the Rust engine through Tauri's global API and exposes it as `api`.
 import type {
-  AccountInfo, ContentKind, Events, FileEntry, InstanceConfig, JavaInstall, Loader, LogFile, McVersion, ModVersion, NewInstance,
+  AccountInfo, Conflict, ContentKind, InstanceUpdates, PackUpdate, Snapshot, Events, FileEntry, ImportCandidate, InstallPlan, InstanceConfig, JavaInstall, Loader, LogFile, McVersion, ModVersion, NewInstance,
   ClientStatus, CrashReport, LauncherUpdate, LibSkin, Screenshot, SearchResult, Server, Settings, SkinInfo, UpdateInfo, World,
 } from './types';
 
@@ -11,7 +11,7 @@ interface TauriGlobal {
 const tauri = (window as unknown as { __TAURI__: TauriGlobal }).__TAURI__;
 const call = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => tauri.core.invoke<T>(cmd, args);
 
-const CHANNELS: (keyof Events)[] = ['game:progress', 'game:log', 'game:state', 'auth:code', 'task:progress'];
+const CHANNELS: (keyof Events)[] = ['game:progress', 'game:log', 'game:state', 'auth:code', 'task:progress', 'task:speed', 'app:launch'];
 
 export const api = {
   listVersions: () => call<McVersion[]>('list_versions'),
@@ -23,9 +23,14 @@ export const api = {
   deleteInstance: (id: string) => call<void>('delete_instance', { id }),
   duplicateInstance: (id: string) => call<InstanceConfig>('duplicate_instance', { id }),
   openPath: (id: string, sub = '') => call<void>('open_path', { id, sub }),
+  isPortable: () => call<boolean>('is_portable'),
   dataDir: () => call<string>('data_dir'),
   openDataDir: () => call<void>('open_data_dir'),
   pickFile: (kind: 'import' | 'skin' | 'content' | 'java' | 'any') => call<string | null>('pick_file', { kind }),
+  pickFolder: () => call<string | null>('pick_folder'),
+  detectImports: () => call<ImportCandidate[]>('detect_imports'),
+  scanImportFolder: (path: string) => call<ImportCandidate[]>('scan_import_folder', { path }),
+  importInstances: (keys: string[], includeWorlds: boolean, taskId: string) => call<InstanceConfig[]>('import_instances', { keys, includeWorlds, taskId }),
   pickSave: (defaultName: string) => call<string | null>('pick_save', { defaultName }),
   importFile: (path: string, taskId: string) => call<InstanceConfig>('import_file', { path, taskId }),
   exportInstance: (id: string, path: string, includeWorlds: boolean, taskId: string) => call<void>('export_instance', { id, path, includeWorlds, taskId }),
@@ -69,12 +74,14 @@ export const api = {
   syncOptions: (id: string, source: string, files: string[]) => call<string[]>('sync_options', { id, source, files }),
   hasVanillaDir: () => call<boolean>('has_vanilla_dir'),
 
+  mrSearchFiltered: (filters: { query: string; kind: ContentKind | 'modpacks'; mc: string; loaders: string[]; categories: string[]; environment: string; sort: string; offset: number; limit: number }) => call<SearchResult>('mr_search_filtered', { filters }),
   mrSearch: (query: string, kind: ContentKind | 'modpacks', mc: string, loader: Loader | null, index: string, offset: number) =>
     call<SearchResult>('mr_search', { query, kind, mc, loader, index, offset }),
   mrVersions: (projectId: string, kind: ContentKind | 'modpacks', mc: string, loader: Loader | null) =>
     call<ModVersion[]>('mr_versions', { projectId, kind, mc, loader }),
   mrInstall: (id: string, kind: ContentKind, versionId: string, title: string, iconUrl: string | null, taskId: string) =>
     call<string[]>('mr_install', { id, kind, versionId, title, iconUrl, taskId }),
+  mrPlan: (id: string, kind: ContentKind, versionId: string, title: string) => call<InstallPlan>('mr_plan', { id, kind, versionId, title }),
   mrInstallModpack: (versionId: string, taskId: string) => call<InstanceConfig>('mr_install_modpack', { versionId, taskId }),
 
   analyzeCrash: (id: string, extra: string, exitCode: number | null) => call<CrashReport>('analyze_crash', { id, extra, exitCode }),
@@ -87,7 +94,22 @@ export const api = {
   clientInstall: (id: string, taskId: string) => call<string>('client_install', { id, taskId }),
   clientRemove: (id: string) => call<void>('client_remove', { id }),
 
-  launch: (id: string) => call<void>('launch', { id }),
+  accountSkins: () => call<Record<string, string>>('account_skins'),
+  listSnapshots: (id: string) => call<Snapshot[]>('list_snapshots', { id }),
+  createSnapshot: (id: string, name: string) => call<Snapshot>('create_snapshot', { id, name }),
+  restoreSnapshot: (id: string, snapshot: string) => call<InstanceConfig>('restore_snapshot', { id, snapshot }),
+  deleteSnapshot: (id: string, snapshot: string) => call<void>('delete_snapshot', { id, snapshot }),
+  checkConflicts: (id: string) => call<Conflict[]>('check_conflicts', { id }),
+  packUpdateCheck: (id: string) => call<PackUpdate | null>('pack_update_check', { id }),
+  packUpdate: (id: string, versionId: string, taskId: string) => call<InstanceConfig>('pack_update', { id, versionId, taskId }),
+  updateAllMods: (taskId: string) => call<InstanceUpdates[]>('update_all_mods', { taskId }),
+  exportTheme: (json: string, defaultName: string) => call<boolean>('export_theme', { json, defaultName }),
+  importTheme: () => call<string | null>('import_theme'),
+  taskPause: (id: string, paused: boolean) => call<void>('task_pause', { id, paused }),
+  taskCancel: (id: string) => call<void>('task_cancel', { id }),
+  takeLaunchRequest: () => call<string | null>('take_launch_request'),
+  createShortcut: (id: string, place: 'desktop' | 'startmenu') => call<string>('create_shortcut', { id, place }),
+  launch: (id: string, join?: { server?: string; world?: string }) => call<void>('launch', { id, joinServer: join?.server ?? null, joinWorld: join?.world ?? null }),
   kill: (id: string) => call<void>('kill', { id }),
   running: () => call<string[]>('running'),
   openExternal: (url: string) => call<void>('open_external', { url }),

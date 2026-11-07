@@ -36,13 +36,56 @@ pub struct SkinInfo {
 }
 
 async fn texture(ctx: &Ctx, url: &str) -> Option<String> {
-    let url = url.replacen("http://", "https://", 1);
+    let url = if url.contains("textures.minecraft.net") { url.replacen("http://", "https://", 1) } else { url.to_string() };
     let r = ctx.http.get(url).send().await.ok()?;
     if !r.status().is_success() {
         return None;
     }
     let bytes = r.bytes().await.ok()?;
     Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+fn session_url() -> String {
+    std::env::var("VOX_SESSION_URL").unwrap_or_else(|_| "https://sessionserver.mojang.com/session/minecraft/profile".to_string())
+}
+
+/// The public skin texture of a Microsoft account (no sign-in needed), as a data: URL.
+/// Kept on disk for a few hours so the account list does not hit the network on every start.
+pub async fn public_skin(ctx: &Ctx, uuid: &str) -> Option<String> {
+    let id: String = uuid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if id.len() != 32 {
+        return None;
+    }
+    let cache = ctx.cache_dir().join("heads").join(format!("{id}.txt"));
+    let age = std::fs::metadata(&cache).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+    if age.map(|a| a < std::time::Duration::from_secs(6 * 3600)).unwrap_or(false) {
+        if let Ok(d) = std::fs::read_to_string(&cache) {
+            return Some(d);
+        }
+    }
+    let fresh = async {
+        let r = ctx.http.get(format!("{}/{id}", session_url())).send().await.ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        let v: Value = r.json().await.ok()?;
+        let prop = v["properties"].as_array()?.iter().find(|p| p["name"] == "textures")?["value"].as_str()?.to_string();
+        let raw = base64::engine::general_purpose::STANDARD.decode(prop).ok()?;
+        let t: Value = serde_json::from_slice(&raw).ok()?;
+        let url = t["textures"]["SKIN"]["url"].as_str()?.to_string();
+        texture(ctx, &url).await
+    }
+    .await;
+    match fresh {
+        Some(d) => {
+            if let Some(dir) = cache.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&cache, &d);
+            Some(d)
+        }
+        None => std::fs::read_to_string(&cache).ok(), // offline: an old copy beats a letter
+    }
 }
 
 async fn token(ctx: &Ctx) -> Result<(String, String)> {

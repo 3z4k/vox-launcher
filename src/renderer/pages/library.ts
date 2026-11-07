@@ -7,6 +7,7 @@ import {
   launch, loadVersions, navigate, progressText, refreshInstances, runTask, scheduleRender, state, stopGame,
 } from '../state';
 import type { InstanceConfig, Loader } from '../types';
+import { importLauncherDialog } from './importer';
 
 let query = '';
 let sort: 'recent' | 'name' | 'played' = 'recent';
@@ -237,11 +238,32 @@ function glassView(items: InstanceConfig[]): HTMLElement[] {
   ];
 }
 
+/** Updates every mod in every instance, then shows what happened. */
+async function updateAllFlow(): Promise<void> {
+  if (!(await confirmDialog('Look for newer versions of the mods in all your instances and install them? A snapshot is saved in each instance first, so you can go back.', 'Update all', false, 'Update all mods'))) return;
+  const rows = await runTask('Updating all mods', (taskId) => api.updateAllMods(taskId));
+  if (!rows) return;
+  await refreshInstances();
+  const updated = rows.reduce((n, r) => n + r.updated.length, 0);
+  const failed = rows.reduce((n, r) => n + r.failed.length, 0);
+  const m = openModal(h('div', { class: 'dlg' },
+    h('h2', {}, updated ? `${updated} mod${updated === 1 ? '' : 's'} updated` : 'Everything is up to date'),
+    h('p', { class: 'dlg-text' }, updated || failed ? `${failed ? `${failed} could not be updated. ` : ''}A snapshot was saved in each changed instance.` : 'None of your instances had mods with newer versions.'),
+    rows.length ? h('div', { class: 'conflict-list' }, rows.map((r) => h('div', { class: 'conflict' + (r.failed.length ? ' error' : '') },
+      h('div', {}, h('b', {}, r.name),
+        r.skipped ? h('div', { class: 'sub' }, r.skipped) : null,
+        ...r.updated.map((u) => h('div', { class: 'sub' }, `${u.title}: ${u.from || '?'} → ${u.to}`)),
+        ...r.failed.map((f) => h('div', { class: 'sub' }, `Could not update ${f}`)))))) : null,
+    h('div', { class: 'dlg-actions' }, h('button', { class: 'btn primary', type: 'button', onClick: () => m.close() }, 'Done'))), true);
+}
+
 export function renderLibrary(): HTMLElement {
   const layout = state.settings.layout;
   const page = h('div', { class: 'page library-page' });
   const actions = h('div', { class: 'head-actions' },
+    state.instances.length ? h('button', { class: 'btn', type: 'button', onClick: () => void updateAllFlow() }, icon('refresh', 16), 'Update all mods') : null,
     h('button', { class: 'btn', type: 'button', onClick: () => void importDialog() }, icon('upload', 16), 'Import'),
+    h('button', { class: 'btn', type: 'button', onClick: () => void importLauncherDialog() }, icon('download', 16), 'From another launcher'),
     h('button', { class: 'btn primary', type: 'button', onClick: () => void newInstanceDialog() }, icon('plus', 16), 'New instance'));
   const title = layout === 'glass' ? greeting() : 'Library';
   const sub = layout === 'glass' ? `${state.instances.length} instance${state.instances.length === 1 ? '' : 's'}` : `${state.instances.length} instance${state.instances.length === 1 ? '' : 's'}`;

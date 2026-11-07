@@ -6,7 +6,9 @@ use serde::{de::DeserializeOwned, Serialize};
 use sha1::{Digest, Sha1};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::AsyncWriteExt;
 
 pub const USER_AGENT: &str = concat!("VoxLauncher/", env!("CARGO_PKG_VERSION"));
@@ -30,6 +32,61 @@ pub fn http_client_with_proxy(proxy: &str) -> reqwest::Client {
         .pool_max_idle_per_host(32)
         .build()
         .expect("http client")
+}
+
+// ---- pause / cancel / speed for background tasks -----------------------------------------
+
+/// Controls shared between the UI (pause, cancel) and the download loops (bytes moved).
+#[derive(Default)]
+pub struct TaskCtl {
+    pub paused: AtomicBool,
+    pub cancelled: AtomicBool,
+    pub bytes: AtomicU64,
+    pub finished: AtomicBool,
+}
+
+tokio::task_local! {
+    /// The task whose downloads are running on this async task, if any.
+    pub static CTL: Arc<TaskCtl>;
+}
+
+fn registry() -> &'static Mutex<HashMap<String, Arc<TaskCtl>>> {
+    static R: OnceLock<Mutex<HashMap<String, Arc<TaskCtl>>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn ctl_for(id: &str) -> Arc<TaskCtl> {
+    registry().lock().unwrap().entry(id.to_string()).or_default().clone()
+}
+
+pub fn ctl_get(id: &str) -> Option<Arc<TaskCtl>> {
+    registry().lock().unwrap().get(id).cloned()
+}
+
+pub fn ctl_drop(id: &str) {
+    if let Some(c) = registry().lock().unwrap().remove(id) {
+        c.finished.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Called from download loops: waits while paused, fails when cancelled, counts bytes.
+async fn gate(n: u64) -> Result<()> {
+    let Ok(c) = CTL.try_with(|c| c.clone()) else { return Ok(()) };
+    loop {
+        if c.cancelled.load(Ordering::Relaxed) {
+            bail!("Cancelled");
+        }
+        if !c.paused.load(Ordering::Relaxed) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    c.bytes.fetch_add(n, Ordering::Relaxed);
+    Ok(())
+}
+
+fn is_cancelled() -> bool {
+    CTL.try_with(|c| c.cancelled.load(Ordering::Relaxed)).unwrap_or(false)
 }
 
 /// Shared handles every module needs. Cheap to clone.
@@ -143,7 +200,12 @@ pub async fn download(http: &reqwest::Client, url: &str, dest: &Path, expect: &E
                 tokio::fs::rename(&part, dest).await?;
                 return Ok(());
             }
-            Err(e) => last = Some(e),
+            Err(e) => {
+                last = Some(e);
+                if is_cancelled() {
+                    break;
+                }
+            }
         }
     }
     let _ = tokio::fs::remove_file(&part).await;
@@ -161,6 +223,7 @@ async fn download_once(http: &reqwest::Client, url: &str, part: &Path, expect: &
     let mut body = resp.bytes_stream();
     while let Some(chunk) = body.next().await {
         let chunk = chunk?;
+        gate(chunk.len() as u64).await?;
         hasher.update(&chunk);
         total += chunk.len() as u64;
         file.write_all(&chunk).await?;

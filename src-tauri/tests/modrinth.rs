@@ -72,6 +72,13 @@ async fn browse_install_with_dependency_update_identify_and_remove() {
             ("GET", "/project/sodium/version") => ok(json!([version_json(base, "sodium-v1", "sodium", "1.0", "sodium-1.0.jar", &s1, json!([{ "project_id": "fabric-api", "version_id": null, "dependency_type": "required" }, { "project_id": "optional-thing", "dependency_type": "optional" }]))])),
             ("GET", "/project/fabric-api/version") => ok(json!([version_json(base, "api-v1", "fabric-api", "0.9", "fabric-api.jar", &ap, json!([]))])),
             ("GET", "/project/fabric-api") => ok(json!({ "title": "Fabric API", "icon_url": null })),
+            ("GET", "/project/ghost/version") => ok(json!([])),
+            ("GET", "/project/ghost") => ok(json!({ "title": "Ghost Lib", "icon_url": null })),
+            ("GET", "/project/handproj") => ok(json!({ "title": "Hand Added Pretty", "icon_url": null })),
+            ("GET", "/version/needy-v1") => ok(version_json(base, "needy-v1", "needy", "1.0", "needy.jar", &s1, json!([
+                { "project_id": "ghost", "version_id": null, "dependency_type": "required" },
+                { "project_id": "fabric-api", "version_id": null, "dependency_type": "required" },
+                { "project_id": "handproj", "version_id": null, "dependency_type": "incompatible" }]))),
             ("GET", "/version/sodium-v2") => ok(version_json(base, "sodium-v2", "sodium", "2.0", "sodium-2.0.jar", &s2, json!([]))),
             ("POST", "/version_files/update") => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap();
@@ -111,6 +118,14 @@ async fn browse_install_with_dependency_update_identify_and_remove() {
     let q = url_decode(&q);
     assert!(q.contains("project_type:mod") && q.contains("versions:1.21.1") && q.contains("categories:quilt") && q.contains("categories:fabric") && q.contains("index=downloads"), "{q}");
 
+    // filtered search: several loaders, categories and an environment; bad tags are dropped, not sent
+    server.log.lock().unwrap().clear();
+    let f = modrinth::SearchFilters { query: "x".into(), kind: "mods".into(), mc: String::new(), loaders: vec!["forge".into(), "neoforge".into(), "bad tag\"]".into()], categories: vec!["optimization".into(), "../x".into()], environment: "client".into(), sort: "follows".into(), offset: 24, limit: 15 };
+    modrinth::search_filtered(&c, &f).await.unwrap();
+    let q = url_decode(&server.log.lock().unwrap().iter().find(|l| l.contains("/search")).unwrap().clone());
+    assert!(q.contains("\"categories:forge\",\"categories:neoforge\"") && q.contains("categories:optimization") && q.contains("client_side:required") && q.contains("client_side:optional") && q.contains("index=follows") && q.contains("offset=24") && q.contains("limit=15"), "{q}");
+    assert!(!q.contains("versions:") && !q.contains("bad tag") && !q.contains("../x"), "{q}");
+
     // install with its required dependency (the optional one is skipped)
     let versions = modrinth::project_versions(&c, "sodium", "mods", "1.21.1", Some(Loader::Fabric)).await.unwrap();
     let added = modrinth::install_with_dependencies(&c, &inst, "mods", &versions[0], "Sodium", None, &noop()).await.unwrap();
@@ -135,6 +150,19 @@ async fn browse_install_with_dependency_update_identify_and_remove() {
     modrinth::identify_files(&c, &inst, "mods").await.unwrap();
     let list = content::list_files(&c, &inst.id, "mods").await.unwrap();
     assert_eq!(list.iter().find(|f| f.name == "whatever.jar").unwrap().title, "Hand Added Pretty");
+
+    // the install preview: what is needed, what is already there, and what could go wrong
+    let needy = modrinth::get_version(&c, "needy-v1").await.unwrap();
+    let plan = modrinth::plan_install(&c, &inst, "mods", &needy, "Needy").await.unwrap();
+    assert_eq!(plan.items.len(), 1, "no installable dependency was found: {plan:?}");
+    assert_eq!(plan.already_installed, ["Fabric API"]);
+    assert!(plan.warnings.iter().any(|w| w.contains("Ghost Lib") && w.contains("no version")), "{:?}", plan.warnings);
+    assert!(plan.warnings.iter().any(|w| w.contains("Hand Added Pretty") && w.contains("does not work")), "{:?}", plan.warnings);
+    // a mod for another Minecraft version, and a mod in an instance without a loader, are flagged
+    let old = instances::create_instance(&c, NewInstance { name: "Old".into(), mc_version: "1.20.1".into(), loader: Loader::Vanilla, loader_version: String::new(), group: String::new(), icon: String::new() }).await.unwrap();
+    let p2 = modrinth::plan_install(&c, &old, "mods", &needy, "Needy").await.unwrap();
+    assert!(p2.warnings.iter().any(|w| w.contains("Minecraft 1.21.1") && w.contains("1.20.1")), "{:?}", p2.warnings);
+    assert!(p2.warnings.iter().any(|w| w.contains("no mod loader")), "{:?}", p2.warnings);
 
     // removing a mod also forgets its metadata
     content::delete_file(&c, &inst.id, "mods", "whatever.jar").await.unwrap();

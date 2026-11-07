@@ -1,6 +1,6 @@
 {
   "name": "vox-launcher",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Vox Launcher: a fast Minecraft: Java Edition launcher (Rust + Tauri)",
   "license": "SEE LICENSE IN LICENSE",
@@ -15,6 +15,6 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "typescript": "^5",
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.24.0"
   }
 }

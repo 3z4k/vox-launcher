@@ -270,6 +270,27 @@ async fn full_launch_against_a_fake_mojang_then_a_warm_relaunch_does_no_network(
     assert!(r.err().map(|e| e.to_string().contains("pre-launch")).unwrap_or(false));
     instances::update_instance(&ctx, &inst.id, serde_json::json!({ "preLaunch": "", "postExit": "", "jvmArgs": "", "extraGameArgs": "", "memoryMb": null, "minMemoryMb": null })).await.unwrap();
 
+    // --- quick join: a server from the instance settings, an unsafe address, and a world ---
+    instances::update_instance(&ctx, &inst.id, serde_json::json!({ "joinServer": "play.example.com:25566" })).await.unwrap();
+    let (code, logs, _, _) = run("join server").await;
+    let all = logs.join("\n");
+    assert_eq!(code, Some(0), "{all}");
+    assert!(all.contains("--server play.example.com --port 25566"), "older versions get --server/--port:\n{all}");
+    assert!(all.contains("Joining play.example.com:25566"), "{all}");
+    instances::update_instance(&ctx, &inst.id, serde_json::json!({ "joinServer": "evil --demo" })).await.unwrap();
+    let (_, logs, _, _) = run("join bad address").await;
+    let all = logs.join("\n");
+    assert!(all.contains("not a valid address") && !all.contains("--server"), "an unsafe address never reaches the command line:\n{all}");
+    std::fs::create_dir_all(ctx.game_dir(&inst.id).join("saves/My World")).unwrap();
+    instances::update_instance(&ctx, &inst.id, serde_json::json!({ "joinServer": "", "joinWorld": "My World" })).await.unwrap();
+    let (_, logs, _, _) = run("join world").await;
+    let all = logs.join("\n");
+    assert!(all.contains("cannot open a world directly"), "this fake version has no quick play support, so it starts normally:\n{all}");
+    instances::update_instance(&ctx, &inst.id, serde_json::json!({ "joinWorld": "../escape" })).await.unwrap();
+    let (_, logs, _, _) = run("join bad world").await;
+    assert!(logs.join("\n").contains("Ignoring the world"));
+    instances::update_instance(&ctx, &inst.id, serde_json::json!({ "joinWorld": "" })).await.unwrap();
+
     // --- a corrupted asset is repaired only when "verify" is requested ---
     let victim = first_file(&ctx.assets_dir().join("objects"));
     let good = std::fs::read(&victim).unwrap();

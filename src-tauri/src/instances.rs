@@ -94,6 +94,8 @@ pub async fn create_instance(ctx: &Ctx, input: NewInstance) -> Result<InstanceCo
         post_exit: String::new(),
         env_vars: String::new(),
         sync_options_from: String::new(),
+        join_server: String::new(),
+        join_world: String::new(),
         verify_next: None,
     };
     tokio::fs::create_dir_all(ctx.game_dir(&id)).await?;

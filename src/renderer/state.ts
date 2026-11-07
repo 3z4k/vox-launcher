@@ -1,6 +1,8 @@
 // Global UI state, navigation, background tasks and game events.
+import { CUSTOM_VAR_NAMES, customVars, isLight, luminance } from './theme';
 import { api } from './bridge';
-import { attempt, errMsg, toast } from './dom';
+import { conflictDialog } from './pages/conflicts';
+import { attempt, errMsg, heads, toast } from './dom';
 import type { AccountInfo, ContentKind, DeviceCode, InstanceConfig, LauncherUpdate, McVersion, Settings, TaskEvent } from './types';
 
 export type Route =
@@ -8,6 +10,7 @@ export type Route =
   | { page: 'instance'; id: string; tab: string }
   | { page: 'discover'; kind: ContentKind | 'modpacks'; instanceId: string | null }
   | { page: 'accounts' }
+  | { page: 'downloads' }
   | { page: 'settings'; section: string };
 
 export interface Prog {
@@ -23,13 +26,26 @@ export interface Task {
   current: number;
   total: number;
   done: boolean;
+  bytes: number;
+  bps: number;
+  paused: boolean;
+  startedAt: number;
 }
+
+export interface TaskLog {
+  title: string;
+  status: 'done' | 'failed' | 'cancelled';
+  bytes: number;
+  at: number;
+  note: string;
+}
+export const taskLog: TaskLog[] = [];
 
 export const DEFAULT_SETTINGS: Settings = {
   defaultMemoryMb: 4096, defaultMinMemoryMb: 512, javaPath: '', autoDownloadJava: true, jvmArgs: '', defaultWidth: 0, defaultHeight: 0,
   defaultFullscreen: false, wrapper: '', preLaunch: '', postExit: '', envVars: '', launcherAction: 'keep', showConsoleOnLaunch: true, checkLauncherUpdates: true, updateRepo: '', notifications: true,
   consoleMaxLines: 2000, showSnapshots: false, checkModUpdates: true, downloadThreads: 16, proxyUrl: '', discordEnabled: true,
-  discordShowInstance: true, discordShowTime: true, discordShowServer: false, theme: 'voxel', layout: 'cover', accent: '', uiScale: 100, compact: false, reduceMotion: false,
+  discordShowInstance: true, discordShowTime: true, discordShowServer: false, theme: 'voxel', layout: 'cover', accent: '', uiScale: 100, compact: false, reduceMotion: false, warnModConflicts: true, customTheme: {},
 };
 
 export const state = {
@@ -52,6 +68,9 @@ export const state = {
 
 let renderHook: () => void = () => undefined;
 let tasksHook: () => void = () => undefined;
+export function tasksChanged(): void {
+  tasksHook();
+}
 export function setHooks(render: () => void, tasks: () => void): void {
   renderHook = render;
   tasksHook = tasks;
@@ -81,6 +100,13 @@ export async function refreshInstances(): Promise<void> {
 }
 export async function refreshAccounts(): Promise<void> {
   state.accounts = (await attempt(() => api.listAccounts())) ?? state.accounts;
+  // Faces load in the background so the account list never waits on the network.
+  void api.accountSkins().then((m) => {
+    const before = heads.size;
+    heads.clear();
+    for (const [id, url] of Object.entries(m)) heads.set(id, url);
+    if (heads.size !== before || before > 0) scheduleRender();
+  }).catch(() => undefined);
 }
 
 /** Saves a partial change to an instance and keeps the local copy in sync. */
@@ -97,26 +123,25 @@ export async function loadVersions(): Promise<McVersion[] | undefined> {
 
 // ---- appearance ---------------------------------------------------------------------------------
 
-function luminance(hex: string): number {
-  const n = parseInt(hex.slice(1), 16);
-  const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => {
-    const c = v / 255;
-    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
 export function applyAppearance(s: Settings): void {
   const root = document.documentElement;
   root.dataset.theme = s.theme;
   root.dataset.layout = s.layout;
   root.dataset.compact = String(s.compact);
   root.dataset.motion = s.reduceMotion ? 'reduced' : 'full';
-  if (/^#[0-9a-f]{6}$/i.test(s.accent)) {
+  const custom = s.theme === 'custom';
+  for (const v of CUSTOM_VAR_NAMES) root.style.removeProperty(v);
+  if (custom) {
+    for (const [k, v] of Object.entries(customVars(s.customTheme))) root.style.setProperty(k, v);
+    root.style.colorScheme = isLight(s.customTheme) ? 'light' : 'dark';
+  } else {
+    root.style.removeProperty('color-scheme');
+  }
+  if (!custom && /^#[0-9a-f]{6}$/i.test(s.accent)) {
     root.style.setProperty('--accent', s.accent);
     root.style.setProperty('--accent-text', s.accent);
     root.style.setProperty('--on-accent', luminance(s.accent) > 0.4 ? '#0e1116' : '#ffffff');
-  } else {
+  } else if (!custom) {
     for (const v of ['--accent', '--accent-text', '--on-accent']) root.style.removeProperty(v);
   }
   const app = document.getElementById('app');
@@ -131,15 +156,25 @@ export function applyAppearance(s: Settings): void {
 
 export async function runTask<T>(title: string, fn: (taskId: string) => Promise<T>): Promise<T | undefined> {
   const id = `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  state.tasks.set(id, { id, title, stage: 'Starting…', current: 0, total: 0, done: false });
+  state.tasks.set(id, { id, title, stage: 'Starting…', current: 0, total: 0, done: false, bytes: 0, bps: 0, paused: false, startedAt: Date.now() });
   tasksHook();
+  const note = (status: TaskLog['status'], msg: string): void => {
+    taskLog.unshift({ title, status, bytes: state.tasks.get(id)?.bytes ?? 0, at: Date.now(), note: msg });
+    taskLog.length = Math.min(taskLog.length, 30);
+  };
   try {
     const out = await fn(id);
+    note('done', '');
     void api.notify('Vox Launcher', `${title} finished.`).catch(() => undefined);
     return out;
   } catch (e) {
-    toast(errMsg(e), true);
-    void api.notify('Vox Launcher', `${title} failed: ${errMsg(e)}`).catch(() => undefined);
+    const cancelled = /cancelled/i.test(errMsg(e));
+    note(cancelled ? 'cancelled' : 'failed', cancelled ? '' : errMsg(e));
+    if (cancelled) toast(`${title} cancelled.`);
+    else {
+      toast(errMsg(e), true);
+      void api.notify('Vox Launcher', `${title} failed: ${errMsg(e)}`).catch(() => undefined);
+    }
     return undefined;
   } finally {
     const t = state.tasks.get(id);
@@ -159,13 +194,20 @@ export function stopGame(id: string): void {
   void attempt(() => api.kill(id));
 }
 
-export async function launch(id: string): Promise<void> {
+export async function launch(id: string, join?: { server?: string; world?: string }): Promise<void> {
+  if (state.settings.warnModConflicts) {
+    const problems = await api.checkConflicts(id).catch(() => []);
+    if (problems.length > 0) {
+      const name = state.instances.find((i) => i.id === id)?.name ?? 'This instance';
+      if (!(await conflictDialog(name, problems))) return;
+    }
+  }
   state.progress.set(id, { stage: 'Starting…', current: 0, total: 0 });
   state.logs.set(id, []);
   scheduleRender();
   if (state.settings.showConsoleOnLaunch) document.dispatchEvent(new CustomEvent('vox-console', { detail: { id, open: true } }));
   try {
-    await api.launch(id);
+    await api.launch(id, join);
   } catch (e) {
     toast(errMsg(e), true);
   } finally {
@@ -182,7 +224,16 @@ export function progressText(p: Prog): string {
   return `${p.stage}${p.total > 1 ? ` (${p.current}/${p.total})` : ''}`;
 }
 
+/** A shortcut (or a second start of the launcher) asked for this instance to be started. */
+export function startFromRequest(id: string): void {
+  const inst = state.instances.find((i) => i.id === id);
+  if (!inst) return toast('That shortcut points to an instance that no longer exists.', true);
+  if (state.running.has(id) || state.progress.has(id)) return;
+  void launch(id);
+}
+
 export function wireEvents(): void {
+  api.on('app:launch', (id) => startFromRequest(id));
   api.on('game:progress', (p) => {
     const first = !state.progress.has(p.id);
     state.progress.set(p.id, { stage: p.stage, current: p.current, total: p.total });
@@ -219,6 +270,14 @@ export function wireEvents(): void {
   api.on('auth:code', (c) => {
     state.loginCode = c;
     scheduleRender();
+  });
+  api.on('task:speed', (e) => {
+    const task = state.tasks.get(e.taskId);
+    if (!task) return;
+    task.bytes = e.bytes;
+    task.bps = e.bps;
+    task.paused = e.paused;
+    tasksHook();
   });
   api.on('task:progress', (t: TaskEvent) => {
     const task = state.tasks.get(t.taskId);

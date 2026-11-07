@@ -48,8 +48,23 @@ impl Ctx {
     }
 }
 
+/// Portable mode: a file called `portable.txt` next to the program keeps all data in a `data`
+/// folder beside it, so the whole launcher can live on a USB stick.
+pub fn portable_root() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    dir.join("portable.txt").is_file().then(|| dir.join("data"))
+}
+
+pub fn is_portable() -> bool {
+    portable_root().is_some()
+}
+
 /// Data folder: reuse the Electron build's folder when it exists so instances carry over.
 pub fn default_root() -> PathBuf {
+    if let Some(p) = portable_root() {
+        return p;
+    }
     let base = dirs_base();
     let legacy = base.join("vox-launcher").join("data");
     if legacy.exists() {

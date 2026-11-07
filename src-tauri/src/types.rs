@@ -79,6 +79,12 @@ pub struct InstanceConfig {
     /// options.txt (video settings, keybinds, ...) is copied from there before every launch.
     #[serde(default)]
     pub sync_options_from: String,
+    /// A server ("host" or "host:port") to join automatically when the game starts. Empty = off.
+    #[serde(default)]
+    pub join_server: String,
+    /// A world (folder name in saves) to open automatically instead. Used when no server is set.
+    #[serde(default)]
+    pub join_world: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_next: Option<bool>,
 }
@@ -86,7 +92,7 @@ pub struct InstanceConfig {
 /// Keys the UI may change through `update_instance`. Identity and game-version fields are not editable.
 pub const EDITABLE_INSTANCE_KEYS: &[&str] = &[
     "name", "versionId", "lastPlayed", "playedMs", "group", "icon", "notes", "memoryMb", "minMemoryMb", "javaPath", "jvmArgs",
-    "extraGameArgs", "width", "height", "fullscreen", "wrapper", "preLaunch", "postExit", "envVars", "syncOptionsFrom", "verifyNext",
+    "extraGameArgs", "width", "height", "fullscreen", "wrapper", "preLaunch", "postExit", "envVars", "syncOptionsFrom", "joinServer", "joinWorld", "verifyNext",
 ];
 
 #[derive(Clone, Debug, Deserialize)]
@@ -141,12 +147,16 @@ pub struct Settings {
     pub discord_show_server: bool,
     // Appearance
     pub theme: String,
-    /// "cover" | "dense" | "glass" | "classic"
+    /// "cover" | "dense" | "glass" | "classic" | "compact" | "right" | "bar" | "zen"
     pub layout: String,
     pub accent: String,
     pub ui_scale: u32,
     pub compact: bool,
     pub reduce_motion: bool,
+    /// Warn about duplicate / mismatched / missing mods before launching.
+    pub warn_mod_conflicts: bool,
+    /// Colours and shape of the "custom" theme. Keys: bg side panel text muted accent border radius.
+    pub custom_theme: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -184,6 +194,8 @@ impl Default for Settings {
             ui_scale: 100,
             compact: false,
             reduce_motion: false,
+            warn_mod_conflicts: true,
+            custom_theme: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -196,6 +208,14 @@ impl Settings {
         self.download_threads = self.download_threads.clamp(1, 64);
         self.console_max_lines = self.console_max_lines.clamp(100, 100_000);
         self.ui_scale = self.ui_scale.clamp(75, 150);
+        self.custom_theme = std::mem::take(&mut self.custom_theme)
+            .into_iter()
+            .filter(|(k, v)| match k.as_str() {
+                "bg" | "side" | "panel" | "text" | "muted" | "accent" | "border" => v.len() == 7 && v.starts_with('#') && v[1..].chars().all(|c| c.is_ascii_hexdigit()),
+                "radius" => v.parse::<u8>().map(|n| n <= 28).unwrap_or(false),
+                _ => false,
+            })
+            .collect();
         for s in [&mut self.java_path, &mut self.proxy_url, &mut self.accent] {
             *s = s.trim().to_string();
         }
@@ -213,10 +233,10 @@ impl Settings {
                 _ => String::new(),
             };
         }
-        if !["cover", "dense", "glass", "classic"].contains(&self.layout.as_str()) {
+        if !["cover", "dense", "glass", "classic", "compact", "right", "bar", "zen"].contains(&self.layout.as_str()) {
             self.layout = "cover".into();
         }
-        if !["voxel", "sleek", "bold", "minimal"].contains(&self.theme.as_str()) {
+        if !["voxel", "sleek", "bold", "minimal", "custom"].contains(&self.theme.as_str()) {
             self.theme = "voxel".into();
         }
         let hex = self.accent.strip_prefix('#').unwrap_or("");

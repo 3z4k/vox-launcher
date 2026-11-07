@@ -121,6 +121,11 @@ pub async fn list_accounts(ctx: &Ctx) -> Vec<AccountInfo> {
         .collect()
 }
 
+/// (account id, uuid) of every Microsoft account.
+pub async fn online_accounts(ctx: &Ctx) -> Vec<String> {
+    load(ctx).await.accounts.iter().filter(|a| !a.offline).map(|a| a.id.clone()).collect()
+}
+
 pub async fn remove_account(ctx: &Ctx, id: &str) -> Result<()> {
     let mut s = load(ctx).await;
     s.accounts.retain(|a| a.id != id);

@@ -55,6 +55,46 @@ impl Running {
 
 /// Downloads everything the instance needs, then starts the game. Returns once the process is running.
 pub async fn launch_instance(ctx: &Ctx, id: &str, hooks: LaunchHooks) -> Result<Running> {
+    launch_instance_with(ctx, id, hooks, None).await
+}
+
+/// Where to drop the player right after the game starts. Overrides the instance's own setting when given.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Join {
+    /// "host" or "host:port"
+    pub server: Option<String>,
+    /// A folder name inside the instance's saves folder.
+    pub world: Option<String>,
+}
+
+/// "play.example.com", "play.example.com:25566" or "[::1]:25565" -> (host, port). Rejects anything odd, so it can never inject extra arguments.
+pub fn parse_server(text: &str) -> Option<(String, u16)> {
+    let t = text.trim();
+    if t.is_empty() || t.len() > 255 || !t.chars().all(|c| c.is_ascii_alphanumeric() || ".-_:[]".contains(c)) {
+        return None;
+    }
+    let (host, port) = if let Some(rest) = t.strip_prefix('[') {
+        let (h, tail) = rest.split_once(']')?;
+        (h.to_string(), tail.strip_prefix(':').map(|p| p.to_string()))
+    } else if t.matches(':').count() == 1 {
+        let (h, p) = t.split_once(':')?;
+        (h.to_string(), Some(p.to_string()))
+    } else if t.contains(':') {
+        return None; // a bare IPv6 address is ambiguous; it needs [brackets]
+    } else {
+        (t.to_string(), None)
+    };
+    if host.is_empty() || host.starts_with('-') {
+        return None;
+    }
+    let port = match port {
+        Some(p) => p.parse::<u16>().ok().filter(|p| *p > 0)?,
+        None => 25565,
+    };
+    Some((host, port))
+}
+
+pub async fn launch_instance_with(ctx: &Ctx, id: &str, hooks: LaunchHooks, join: Option<Join>) -> Result<Running> {
     let mut inst = get_instance(ctx, id).await?;
     let settings = get_settings(ctx).await;
     let report = throttled(hooks.progress.clone());
@@ -143,8 +183,53 @@ pub async fn launch_instance(ctx: &Ctx, id: &str, hooks: LaunchHooks) -> Result<
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
     .collect();
-    let features = HashMap::from([("has_custom_resolution".to_string(), has_resolution)]);
-    let (jvm, game) = build_args(&resolved, &vars, &features, &current_platform());
+    // Quick play: join a server or open a world straight away.
+    let join = join.unwrap_or_else(|| Join {
+        server: (!inst.join_server.trim().is_empty()).then(|| inst.join_server.clone()),
+        world: (!inst.join_world.trim().is_empty()).then(|| inst.join_world.clone()),
+    });
+    let server = join.server.as_deref().and_then(|t| {
+        let p = parse_server(t);
+        if p.is_none() {
+            (hooks.log)(format!("Ignoring the server address \"{t}\": it is not a valid address."));
+        }
+        p
+    });
+    let world = match (&server, join.world.as_deref()) {
+        (None, Some(w)) => {
+            let ok = !w.is_empty() && !w.contains(['/', '\\']) && w != ".." && w != "." && game_directory.join("saves").join(w).is_dir();
+            if !ok {
+                (hooks.log)(format!("Ignoring the world \"{w}\": it was not found in this instance."));
+            }
+            ok.then(|| w.to_string())
+        }
+        _ => None,
+    };
+    let mut vars = vars;
+    let mut features = HashMap::from([("has_custom_resolution".to_string(), has_resolution)]);
+    if let Some((h, p)) = &server {
+        features.insert("is_quick_play_multiplayer".into(), true);
+        vars.insert("quickPlayMultiplayer".into(), format!("{h}:{p}"));
+    }
+    if let Some(w) = &world {
+        features.insert("is_quick_play_singleplayer".into(), true);
+        vars.insert("quickPlaySingleplayer".into(), w.clone());
+    }
+    let (jvm, mut game) = build_args(&resolved, &vars, &features, &current_platform());
+    if let Some((h, p)) = &server {
+        if !game.iter().any(|a| a == "--quickPlayMultiplayer") {
+            // Minecraft before 1.20 has no quick play; it takes --server and --port instead.
+            game.extend(["--server".into(), h.clone(), "--port".into(), p.to_string()]);
+        }
+        (hooks.log)(format!("Joining {h}:{p} after the game starts."));
+    }
+    if let Some(w) = &world {
+        if game.iter().any(|a| a == "--quickPlaySingleplayer") {
+            (hooks.log)(format!("Opening the world \"{w}\" after the game starts."));
+        } else {
+            (hooks.log)("This Minecraft version cannot open a world directly (1.20 or newer is needed). Starting normally.".to_string());
+        }
+    }
 
     let max_mem = inst.memory_mb.unwrap_or(settings.default_memory_mb);
     let min_mem = inst.min_memory_mb.unwrap_or(settings.default_min_memory_mb).min(max_mem);
@@ -289,6 +374,17 @@ pub async fn run_shell(command: &str, cwd: &std::path::Path, a: &[(String, Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn server_addresses_are_parsed_strictly() {
+        assert_eq!(parse_server("play.example.com"), Some(("play.example.com".into(), 25565)));
+        assert_eq!(parse_server(" play.example.com:25566 "), Some(("play.example.com".into(), 25566)));
+        assert_eq!(parse_server("[::1]:30000"), Some(("::1".into(), 30000)));
+        assert_eq!(parse_server("[::1]"), Some(("::1".into(), 25565)));
+        for bad in ["", "host:0", "host:99999", "host:abc", "-evil", "a b", "host --demo", "x;y", "a:b:c"] {
+            assert_eq!(parse_server(bad), None, "{bad}");
+        }
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

@@ -36,6 +36,9 @@ pub struct Asset {
 fn mc_of(name: &str) -> Option<String> {
     let stem = name.strip_prefix(PREFIX)?.strip_suffix(".jar")?;
     let (_, mc) = stem.split_once("+mc")?;
+    if mc.ends_with("-sources") || mc.ends_with("-dev") || mc.ends_with("-javadoc") {
+        return None; // build by-products, not the mod itself
+    }
     (!mc.is_empty() && mc.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')).then(|| mc.to_string())
 }
 

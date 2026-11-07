@@ -1,8 +1,9 @@
 // Accounts (Microsoft + offline) and the skin / cape manager.
 import { api } from '../bridge';
-import { attempt, card, colorFor, confirmDialog, emptyState, formDialog, h, icon, iconButton, segmented, spinner, toast } from '../dom';
+import { attempt, card, faceAvatar, confirmDialog, emptyState, formDialog, h, icon, iconButton, segmented, spinner, toast } from '../dom';
 import { refreshAccounts, scheduleRender, state } from '../state';
 import type { AccountInfo, LibSkin, SkinInfo } from '../types';
+import { skinViewer } from './skin3d';
 
 let skin: SkinInfo | null = null;
 let skinFor = '';
@@ -45,7 +46,7 @@ async function signIn(): Promise<void> {
 
 function accountRow(a: AccountInfo): HTMLElement {
   return h('div', { class: 'item' },
-    h('div', { class: 'avatar', style: { background: colorFor(a.id), width: '40px', height: '40px', borderRadius: '10px' } }, a.name.charAt(0).toUpperCase()),
+    faceAvatar(a, 40, 10),
     h('div', { class: 'grow' }, h('div', { class: 'title' }, a.name), h('div', { class: 'badge-row' }, h('span', { class: 'chip' }, a.offline ? 'Offline' : 'Microsoft'), a.active ? h('span', { class: 'chip accent' }, 'Active') : null)),
     h('div', { class: 'item-actions' },
       a.active ? null : h('button', { class: 'btn small', type: 'button', onClick: async () => { await attempt(() => api.setActiveAccount(a.id)); await refreshAccounts(); skinFor = ''; scheduleRender(); } }, 'Use'),
@@ -114,7 +115,7 @@ export function drawSkin(canvas: HTMLCanvasElement, src: string, slim: boolean, 
 }
 
 let library: LibSkin[] | null = null;
-let backView = false;
+let viewMode: 'spin' | 'front' | 'back' = 'spin';
 let pendingVariant: 'classic' | 'slim' = 'classic';
 
 async function loadLibrary(): Promise<void> {
@@ -194,10 +195,18 @@ function skinPanel(active: AccountInfo): HTMLElement {
     return panel;
   }
   const info = skin;
-  const canvas = h('canvas', { width: 16, height: 32, 'aria-label': 'Skin preview' });
-  if (info.skin) drawSkin(canvas, info.skin, info.variant === 'slim', backView);
-  panel.appendChild(h('div', { class: 'skin-stage' }, canvas,
-    segmented<'front' | 'back'>([{ value: 'front', label: 'Front' }, { value: 'back', label: 'Back' }], backView ? 'back' : 'front', (v) => { backView = v === 'back'; scheduleRender(); })));
+  const activeCape = info.capes.find((c) => c.active)?.data ?? null;
+  const viewer = info.skin ? skinViewer(info.skin, info.variant === 'slim', activeCape, state.settings.reduceMotion) : null;
+  const applyMode = (m: 'spin' | 'front' | 'back') => {
+    viewMode = m;
+    if (!viewer) return;
+    viewer.setAuto(m === 'spin');
+    if (m === 'front') viewer.setView(0);
+    if (m === 'back') viewer.setView(180);
+  };
+  if (viewer && viewMode !== 'spin') applyMode(viewMode);
+  panel.appendChild(h('div', { class: 'skin-stage' }, viewer ? viewer.el : h('div', { class: 'sub' }, 'No skin to show.'),
+    segmented<'spin' | 'front' | 'back'>([{ value: 'spin', label: 'Spin' }, { value: 'front', label: 'Front' }, { value: 'back', label: 'Back' }], viewMode, applyMode)));
   let variant = info.variant;
   const variantSel = h('select', { 'aria-label': 'Arm style', onChange: () => { variant = variantSel.value as 'classic' | 'slim'; } },
     h('option', { value: 'classic' }, 'Classic arms (Steve)'), h('option', { value: 'slim' }, 'Slim arms (Alex)'));
@@ -223,7 +232,10 @@ function skinPanel(active: AccountInfo): HTMLElement {
           im.onload = () => { const x = cv.getContext('2d'); if (x) { x.imageSmoothingEnabled = false; x.drawImage(im, 1, 1, 10, 16, 0, 0, 10, 16); } };
           im.src = c.data;
         }
-        return h('button', { class: `cape${c.active ? ' active' : ''}`, type: 'button', title: c.alias, onClick: async () => { await attempt(() => api.setCape(c.id)); skinFor = ''; scheduleRender(); } }, cv);
+        const btn = h('button', { class: `cape${c.active ? ' active' : ''}`, type: 'button', title: `${c.alias} (hover to preview)`, onClick: async () => { await attempt(() => api.setCape(c.id)); skinFor = ''; scheduleRender(); } }, cv);
+        btn.addEventListener('mouseenter', () => viewer?.setCape(c.data));
+        btn.addEventListener('mouseleave', () => viewer?.setCape(activeCape));
+        return btn;
       })));
   }
   return panel;

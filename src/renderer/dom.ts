@@ -253,6 +253,38 @@ export function avatar(inst: Pick<InstanceConfig, 'id' | 'name' | 'icon'>, size 
   );
 }
 
+/** Skin textures (data: URLs) of Microsoft accounts, by account id. Filled in by the app state. */
+export const heads = new Map<string, string>();
+const skinImages = new Map<string, Promise<HTMLImageElement>>();
+
+function loadSkin(url: string): Promise<HTMLImageElement> {
+  let p = skinImages.get(url);
+  if (!p) {
+    p = new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    skinImages.set(url, p);
+  }
+  return p;
+}
+
+/** The front of the player's face (with the hat layer) cut out of their skin; a coloured letter until it loads or when there is no skin. */
+export function faceAvatar(acc: { id: string; name: string }, size: number, radius: number): HTMLElement {
+  const box = h('div', { class: 'avatar', 'aria-hidden': 'true', style: { background: colorFor(acc.id), width: `${size}px`, height: `${size}px`, borderRadius: `${radius}px`, fontSize: `${Math.round(size * 0.42)}px`, overflow: 'hidden' } }, acc.name.charAt(0).toUpperCase());
+  const url = heads.get(acc.id);
+  if (!url) return box;
+  void loadSkin(url).then((img) => {
+    const c = h('canvas', { width: 8, height: 8, class: 'face', style: { width: '100%', height: '100%', imageRendering: 'pixelated', display: 'block' } });
+    const g = c.getContext('2d');
+    if (!g) return;
+    g.imageSmoothingEnabled = false;
+    // Natural size may be 64x64 or the old 64x32; coordinates are on a 64-wide grid either way.
+    const k = img.naturalWidth / 64;
+    g.drawImage(img, 8 * k, 8 * k, 8 * k, 8 * k, 0, 0, 8, 8);
+    g.drawImage(img, 40 * k, 8 * k, 8 * k, 8 * k, 0, 0, 8, 8);
+    box.replaceChildren(c);
+  }).catch(() => undefined);
+  return box;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Controls
 // ---------------------------------------------------------------------------------------------

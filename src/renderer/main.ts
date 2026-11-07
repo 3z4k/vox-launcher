@@ -1,9 +1,10 @@
 // Entry point: loads state, wires events, draws the sidebar and routes between pages.
 import { api } from './bridge';
-import { colorFor, emptyState, h, icon, logo, type IconName } from './dom';
+import { emptyState, faceAvatar, h, icon, logo, type IconName } from './dom';
 import {
-  applyAppearance, navigate, refreshAccounts, refreshInstances, scheduleRender, setHooks, state, wireEvents, type Route,
+  applyAppearance, navigate, startFromRequest, refreshAccounts, refreshInstances, scheduleRender, setHooks, state, wireEvents, type Route,
 } from './state';
+import { renderDownloads, taskControls, taskLine } from './pages/downloads';
 import { renderAccounts } from './pages/accounts';
 import { mountConsole, syncConsole } from './pages/console';
 import { showCrashHelper } from './pages/crash';
@@ -20,6 +21,7 @@ const tray = document.getElementById('tray')!;
 const NAV: { page: Route['page']; label: string; icon: IconName; go: () => Route }[] = [
   { page: 'library', label: 'Library', icon: 'grid', go: () => ({ page: 'library' }) },
   { page: 'discover', label: 'Discover', icon: 'compass', go: () => ({ page: 'discover', kind: 'mods', instanceId: null }) },
+  { page: 'downloads', label: 'Downloads', icon: 'download', go: () => ({ page: 'downloads' }) },
   { page: 'accounts', label: 'Accounts', icon: 'user', go: () => ({ page: 'accounts' }) },
   { page: 'settings', label: 'Settings', icon: 'gear', go: () => ({ page: 'settings', section: 'general' }) },
 ];
@@ -32,7 +34,7 @@ function drawSidebar(): void {
       icon(n.icon, 19), h('span', { class: 'label' }, n.label))),
     h('div', { class: 'nav-spacer' }),
     h('button', { class: 'side-account', type: 'button', onClick: () => navigate({ page: 'accounts' }), 'aria-label': 'Accounts' },
-      h('div', { class: 'avatar', style: { background: active ? colorFor(active.id) : 'var(--hover)', width: '32px', height: '32px', borderRadius: '8px' } }, active ? active.name.charAt(0).toUpperCase() : icon('user', 16)),
+      active ? faceAvatar(active, 32, 8) : h('div', { class: 'avatar', style: { background: 'var(--hover)', width: '32px', height: '32px', borderRadius: '8px' } }, icon('user', 16)),
       h('div', {}, h('div', { class: 'name' }, active ? active.name : 'No account'), h('div', { class: 'sub' }, active ? (active.offline ? 'Offline' : 'Microsoft') : 'Sign in to play online'))));
 }
 
@@ -54,6 +56,7 @@ function render(): void {
       : r.page === 'instance' ? renderInstance(r.id, r.tab)
       : r.page === 'discover' ? renderDiscover(r.kind, r.instanceId)
       : r.page === 'accounts' ? renderAccounts()
+      : r.page === 'downloads' ? renderDownloads()
       : renderSettings(r.section);
   } catch (e) {
     page = h('div', { class: 'page' }, emptyState('info', 'Something went wrong drawing this page', e instanceof Error ? e.message : String(e)));
@@ -64,11 +67,12 @@ function render(): void {
 }
 
 function drawTray(): void {
+  if (state.route.page === 'downloads') { tray.replaceChildren(); scheduleRender(); return; }
   tray.replaceChildren(...[...state.tasks.values()].map((t) => {
     const value = t.total ? Math.round((t.current / t.total) * 100) : 0;
     return h('div', { class: `task${t.done ? ' done' : ''}` }, h('b', {}, t.title),
       h('div', { class: `pbar${t.total && !t.done ? '' : t.done ? '' : ' indeterminate'}` }, h('div', { style: { width: `${t.done ? 100 : value}%` } })),
-      h('div', { class: 'sub' }, t.done ? 'Done' : `${t.stage}${t.total > 1 ? ` (${t.current}/${t.total})` : ''}`));
+      h('div', { class: 'sub' }, taskLine(t)), taskControls(t));
   }));
 }
 
@@ -93,6 +97,8 @@ async function boot(): Promise<void> {
   state.hasVanillaDir = vanilla;
   render();
   scheduleRender();
+  const requested = await api.takeLaunchRequest().catch(() => null);
+  if (requested) startFromRequest(requested);
   if (state.settings.checkLauncherUpdates) setTimeout(() => void checkForUpdate(false), 2500);
 }
 

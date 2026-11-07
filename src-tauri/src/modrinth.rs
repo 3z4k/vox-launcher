@@ -146,18 +146,58 @@ impl ModVersion {
 // ---- search & versions ---------------------------------------------------------------
 
 /// `kind`: mods | resourcepacks | shaderpacks | modpacks. `loader` and `mc` narrow the results when given.
+/// Everything the Discover page can filter by.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SearchFilters {
+    pub query: String,
+    pub kind: String,
+    /// Minecraft version; empty means any.
+    pub mc: String,
+    /// Loader names (fabric, quilt, forge, neoforge, ...); empty means any. Mods and modpacks only.
+    pub loaders: Vec<String>,
+    /// Categories to require; every one must match.
+    pub categories: Vec<String>,
+    /// "" (any), "client" (works on the player's side) or "server".
+    pub environment: String,
+    pub sort: String,
+    pub offset: u32,
+    /// Results per page (1 to 100); 0 means the default of 24.
+    pub limit: u32,
+}
+
+fn clean_tag(s: &str) -> Option<String> {
+    let ok = !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '+');
+    ok.then(|| s.to_string())
+}
+
 pub async fn search(ctx: &Ctx, query: &str, kind: &str, mc: &str, loader: Option<Loader>, index: &str, offset: u32) -> Result<SearchResult> {
+    let loaders = match (kind, loader) {
+        ("mods", Some(l)) => compatible_loaders(l).iter().map(|s| s.to_string()).collect(),
+        _ => vec![],
+    };
+    search_filtered(ctx, &SearchFilters { query: query.into(), kind: kind.into(), mc: mc.into(), loaders, sort: index.into(), offset, ..Default::default() }).await
+}
+
+pub async fn search_filtered(ctx: &Ctx, f: &SearchFilters) -> Result<SearchResult> {
+    let (query, kind, mc, index, offset) = (f.query.as_str(), f.kind.as_str(), f.mc.as_str(), f.sort.as_str(), f.offset);
     let mut facets: Vec<Value> = vec![json!([format!("project_type:{}", project_type_for(kind))])];
-    if !mc.is_empty() {
-        facets.push(json!([format!("versions:{mc}")]));
+    if let Some(v) = clean_tag(mc) {
+        facets.push(json!([format!("versions:{v}")]));
     }
-    if kind == "mods" {
-        if let Some(l) = loader {
-            let cats: Vec<String> = compatible_loaders(l).iter().map(|c| format!("categories:{c}")).collect();
-            if !cats.is_empty() {
-                facets.push(json!(cats));
-            }
+    if kind == "mods" || kind == "modpacks" {
+        let cats: Vec<String> = f.loaders.iter().filter_map(|l| clean_tag(l)).map(|c| format!("categories:{c}")).collect();
+        if !cats.is_empty() {
+            facets.push(json!(cats)); // any of the chosen loaders
         }
+    }
+    for c in f.categories.iter().filter_map(|c| clean_tag(c)).take(8) {
+        facets.push(json!([format!("categories:{c}")])); // all of the chosen categories
+    }
+    match f.environment.as_str() {
+        "client" => facets.push(json!(["client_side:required", "client_side:optional"])),
+        "server" => facets.push(json!(["server_side:required", "server_side:optional"])),
+        _ => {}
     }
     let index = if ["relevance", "downloads", "follows", "newest", "updated"].contains(&index) { index } else { "relevance" };
     let resp = ctx
@@ -166,7 +206,7 @@ pub async fn search(ctx: &Ctx, query: &str, kind: &str, mc: &str, loader: Option
         .query(&[
             ("query", query.to_string()),
             ("facets", Value::Array(facets).to_string()),
-            ("limit", "24".to_string()),
+            ("limit", (if f.limit == 0 { 24 } else { f.limit.clamp(1, 100) }).to_string()),
             ("offset", offset.to_string()),
             ("index", index.to_string()),
         ])
@@ -308,6 +348,133 @@ async fn project_title(ctx: &Ctx, project_id: &str) -> (String, Option<String>) 
     (v["title"].as_str().unwrap_or(project_id).to_string(), v["icon_url"].as_str().map(String::from))
 }
 
+/// One file that an install will add.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanItem {
+    pub project_id: String,
+    pub version_id: String,
+    pub title: String,
+    pub version_number: String,
+    /// "main" for the thing the person chose, "dependency" for a required extra.
+    pub role: String,
+}
+
+/// What installing a version would do, shown before anything is downloaded.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Plan {
+    pub items: Vec<PlanItem>,
+    /// Required mods that are already installed (nothing to do).
+    pub already_installed: Vec<String>,
+    /// Things that may stop it from working: wrong version/loader, a required mod that could not be found, conflicts.
+    pub warnings: Vec<String>,
+}
+
+/// Reasons `v` may not work in `inst` (empty when it looks fine).
+pub fn compat_problems(inst: &InstanceConfig, kind: &str, v: &ModVersion) -> Vec<String> {
+    let mut out = Vec::new();
+    if !v.game_versions.is_empty() && !v.game_versions.iter().any(|g| g == &inst.mc_version) {
+        out.push(format!("Made for Minecraft {}, but this instance runs {}.", v.game_versions.iter().take(3).cloned().collect::<Vec<_>>().join(", "), inst.mc_version));
+    }
+    if kind == "mods" {
+        if inst.loader == Loader::Vanilla {
+            out.push("This instance has no mod loader, so mods will not load. Add Fabric, Quilt, Forge or NeoForge first.".into());
+        } else {
+            let ok = compatible_loaders(inst.loader);
+            if !v.loaders.is_empty() && !v.loaders.iter().any(|l| ok.contains(&l.as_str())) {
+                out.push(format!("Made for {}, but this instance uses {}.", v.loaders.join(", "), inst.loader.as_str()));
+            }
+        }
+    }
+    out
+}
+
+struct Resolved {
+    /// In install order: the chosen version first, then its dependencies.
+    versions: Vec<(ModVersion, String, Option<String>, bool)>,
+    already_installed: Vec<String>,
+    warnings: Vec<String>,
+}
+
+/// Works out the chosen version plus every *required* dependency that is not installed yet.
+async fn resolve(ctx: &Ctx, inst: &InstanceConfig, kind: &str, v: &ModVersion, title: &str, icon_url: Option<String>) -> Result<Resolved> {
+    check_kind(kind)?;
+    let mut r = Resolved { versions: Vec::new(), already_installed: Vec::new(), warnings: compat_problems(inst, kind, v) };
+    let mut queue: std::collections::VecDeque<(ModVersion, String, Option<String>, u8)> = std::collections::VecDeque::new();
+    queue.push_back((v.clone(), title.to_string(), icon_url, 0));
+    let mut seen: HashSet<String> = HashSet::new();
+    if kind == "mods" {
+        // Recognise mods that were added by hand, so they are not installed a second time.
+        let _ = identify_files(ctx, inst, kind).await;
+    }
+    let installed: HashMap<String, String> = load_meta(ctx, &inst.id).await.values().map(|e| (e.project_id.clone(), e.title.clone())).collect();
+    let loader = (inst.loader != Loader::Vanilla).then_some(inst.loader);
+    while let Some((ver, name, icon, depth)) = queue.pop_front() {
+        if !seen.insert(ver.project_id.clone()) {
+            continue;
+        }
+        let is_main = r.versions.is_empty();
+        r.versions.push((ver.clone(), name, icon, is_main));
+        if kind != "mods" {
+            continue;
+        }
+        for d in ver.dependencies.iter() {
+            let Some(pid) = d.project_id.clone() else { continue };
+            if d.kind == "incompatible" {
+                if installed.contains_key(&pid) {
+                    let (t, _) = project_title(ctx, &pid).await;
+                    r.warnings.push(format!("{} says it does not work with {t}, which you already have installed.", ver.name));
+                }
+                continue;
+            }
+            if d.kind != "required" || seen.contains(&pid) {
+                continue;
+            }
+            if let Some(t) = installed.get(&pid) {
+                if !r.already_installed.contains(t) {
+                    r.already_installed.push(t.clone());
+                }
+                continue;
+            }
+            if depth >= 3 {
+                let (t, _) = project_title(ctx, &pid).await;
+                r.warnings.push(format!("Needs {t}, which was not installed because the chain of requirements is too long. Add it yourself."));
+                continue;
+            }
+            // Prefer the exact version the author pinned, if it fits this instance; otherwise the newest one that does.
+            let pinned = match &d.version_id {
+                Some(vid) => get_version(ctx, vid).await.ok().filter(|dv| compat_problems(inst, kind, dv).is_empty()),
+                None => None,
+            };
+            let dep_ver = match pinned {
+                Some(dv) => Some(dv),
+                None => project_versions(ctx, &pid, kind, &inst.mc_version, loader).await.ok().and_then(|mut l| (!l.is_empty()).then(|| l.remove(0))),
+            };
+            let (t, i) = project_title(ctx, &pid).await;
+            match dep_ver {
+                Some(dv) => queue.push_back((dv, t, i, depth + 1)),
+                None => r.warnings.push(format!("Needs {t}, but no version of it fits Minecraft {}{}. The mod may not start without it.", inst.mc_version, if inst.loader == Loader::Vanilla { String::new() } else { format!(" on {}", inst.loader.as_str()) })),
+            }
+        }
+    }
+    Ok(r)
+}
+
+/// Shows what installing `v` would add, without downloading anything.
+pub async fn plan_install(ctx: &Ctx, inst: &InstanceConfig, kind: &str, v: &ModVersion, title: &str) -> Result<Plan> {
+    let r = resolve(ctx, inst, kind, v, title, None).await?;
+    Ok(Plan {
+        items: r
+            .versions
+            .iter()
+            .map(|(ver, name, _, main)| PlanItem { project_id: ver.project_id.clone(), version_id: ver.id.clone(), title: name.clone(), version_number: ver.version_number.clone(), role: if *main { "main".into() } else { "dependency".into() } })
+            .collect(),
+        already_installed: r.already_installed,
+        warnings: r.warnings,
+    })
+}
+
 /// Installs a version and, for mods, every *required* dependency that is not installed yet.
 /// Returns the file names that were added.
 pub async fn install_with_dependencies(
@@ -319,37 +486,14 @@ pub async fn install_with_dependencies(
     icon_url: Option<String>,
     report: &Report,
 ) -> Result<Vec<String>> {
-    check_kind(kind)?;
+    let r = resolve(ctx, inst, kind, v, title, icon_url).await?;
+    let total = r.versions.len() as u64;
     let mut added = Vec::new();
-    let mut queue: Vec<(ModVersion, String, Option<String>, u8)> = vec![(v.clone(), title.to_string(), icon_url, 0)];
-    let mut seen: HashSet<String> = HashSet::new();
-    let installed: HashSet<String> = load_meta(ctx, &inst.id).await.values().map(|e| e.project_id.clone()).collect();
-    let loader = (inst.loader != Loader::Vanilla).then_some(inst.loader);
-    while let Some((ver, name, icon, depth)) = queue.pop() {
-        if !seen.insert(ver.project_id.clone()) {
-            continue;
-        }
-        report(&format!("Installing {name}"), added.len() as u64, (added.len() + queue.len() + 1) as u64);
+    for (ver, name, icon, _) in r.versions {
+        report(&format!("Installing {name}"), added.len() as u64, total);
         added.push(install_version(ctx, inst, kind, &ver, &name, icon).await?);
-        if kind != "mods" || depth >= 3 {
-            continue;
-        }
-        for d in ver.dependencies.iter().filter(|d| d.kind == "required") {
-            let Some(pid) = d.project_id.clone() else { continue };
-            if installed.contains(&pid) || seen.contains(&pid) {
-                continue;
-            }
-            let dep_ver = match &d.version_id {
-                Some(vid) => get_version(ctx, vid).await.ok(),
-                None => project_versions(ctx, &pid, kind, &inst.mc_version, loader).await.ok().and_then(|mut l| (!l.is_empty()).then(|| l.remove(0))),
-            };
-            if let Some(dv) = dep_ver {
-                let (t, i) = project_title(ctx, &pid).await;
-                queue.push((dv, t, i, depth + 1));
-            }
-        }
     }
-    report("Done", added.len() as u64, added.len() as u64);
+    report("Done", added.len() as u64, total);
     Ok(added)
 }
 

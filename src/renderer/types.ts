@@ -1,7 +1,7 @@
 // Shapes exchanged with the Rust engine. Field names match src-tauri/src/types.rs (camelCase).
 
-export type Layout = 'cover' | 'dense' | 'glass' | 'classic';
-export type Theme = 'voxel' | 'sleek' | 'bold' | 'minimal';
+export type Layout = 'cover' | 'dense' | 'glass' | 'classic' | 'compact' | 'right' | 'bar' | 'zen';
+export type Theme = 'voxel' | 'sleek' | 'bold' | 'minimal' | 'custom';
 export type Loader = 'vanilla' | 'fabric' | 'quilt' | 'forge' | 'neoforge';
 export type ContentKind = 'mods' | 'resourcepacks' | 'shaderpacks';
 
@@ -31,6 +31,8 @@ export interface InstanceConfig {
   postExit: string;
   envVars: string;
   syncOptionsFrom: string;
+  joinServer: string;
+  joinWorld: string;
   verifyNext?: boolean;
 }
 
@@ -76,6 +78,8 @@ export interface Settings {
   uiScale: number;
   compact: boolean;
   reduceMotion: boolean;
+  warnModConflicts: boolean;
+  customTheme: Record<string, string>;
 }
 
 export interface AccountInfo {
@@ -189,6 +193,11 @@ export interface ModVersion {
   files: VFile[];
   dependencies: { projectId: string | null; versionId: string | null; kind: string }[];
 }
+export interface InstallPlan {
+  items: { projectId: string; versionId: string; title: string; versionNumber: string; role: 'main' | 'dependency' }[];
+  alreadyInstalled: string[];
+  warnings: string[];
+}
 export interface UpdateInfo {
   filename: string;
   projectId: string;
@@ -213,6 +222,12 @@ export interface TaskEvent {
   current: number;
   total: number;
 }
+export interface SpeedEvent {
+  taskId: string;
+  bytes: number;
+  bps: number;
+  paused: boolean;
+}
 export interface StateEvent {
   id: string;
   running: boolean;
@@ -224,6 +239,8 @@ export interface Events {
   'game:state': StateEvent;
   'auth:code': DeviceCode;
   'task:progress': TaskEvent;
+  'task:speed': SpeedEvent;
+  'app:launch': string;
 }
 
 export interface LauncherUpdate {
@@ -258,4 +275,44 @@ export interface ClientStatus {
   installed: string | null;
   supported: string[];
   sourceKnown: boolean;
+}
+
+export interface ImportCandidate {
+  source: 'prism' | 'multimc' | 'official' | 'curseforge';
+  sourceLabel: string;
+  key: string;
+  name: string;
+  mcVersion: string;
+  loader: Loader;
+  loaderVersion: string;
+  mods: number;
+  worlds: number;
+  problem: string | null;
+}
+
+export interface Snapshot {
+  id: string;
+  name: string;
+  created: number;
+  mcVersion: string;
+  loader: Loader;
+  loaderVersion: string;
+  mods: string[];
+}
+export interface Conflict {
+  severity: 'error' | 'warn';
+  title: string;
+  detail: string;
+  files: string[];
+}
+export interface PackUpdate {
+  current: string;
+  latest: ModVersion;
+}
+export interface InstanceUpdates {
+  id: string;
+  name: string;
+  updated: { title: string; from: string; to: string }[];
+  failed: string[];
+  skipped: string | null;
 }

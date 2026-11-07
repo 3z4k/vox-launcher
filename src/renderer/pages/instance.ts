@@ -2,9 +2,9 @@
 import { api } from '../bridge';
 import {
   attempt, avatar, confirmDialog, debounce, emptyState, field, fmtBytes, fmtDate, fmtDuration, formDialog, h, icon, iconButton, INSTANCE_ICONS,
-  relativeTime, row, segmented, select, spinner, toast, toggle, card,
+  relativeTime, row, segmented, select, spinner, toast, toggle, card, openModal,
 } from '../dom';
-import { instanceById, navigate, patchInstance, refreshInstances, runTask, scheduleRender, state } from '../state';
+import { instanceById, navigate, patchInstance, refreshInstances, launch, runTask, scheduleRender, state } from '../state';
 import type { ContentKind, FileEntry, InstanceConfig, LogFile, Screenshot, Server, UpdateInfo, World } from '../types';
 import { colorLine } from './console';
 import { showCrashHelper } from './crash';
@@ -17,6 +17,7 @@ const TABS: { id: string; label: string; icon: Parameters<typeof icon>[0] }[] = 
   { id: 'screenshots', label: 'Screenshots', icon: 'image' },
   { id: 'packs', label: 'Packs', icon: 'layers' },
   { id: 'servers', label: 'Servers', icon: 'server' },
+  { id: 'snapshots', label: 'Snapshots', icon: 'clock' },
   { id: 'logs', label: 'Logs', icon: 'file' },
   { id: 'settings', label: 'Settings', icon: 'sliders' },
 ];
@@ -46,6 +47,7 @@ export function renderInstance(id: string, tab: string): HTMLElement {
     case 'screenshots': body.appendChild(screenshotsTab(inst)); break;
     case 'packs': body.appendChild(packsTab(inst)); break;
     case 'servers': body.appendChild(serversTab(inst)); break;
+    case 'snapshots': body.appendChild(snapshotsTab(inst)); break;
     case 'logs': body.appendChild(logsTab(inst)); break;
     case 'settings': body.appendChild(settingsTab(inst)); break;
     default: body.appendChild(overviewTab(inst));
@@ -65,6 +67,7 @@ function overviewTab(inst: InstanceConfig): HTMLElement {
   const notes = h('textarea', { rows: 5, placeholder: 'Notes about this instance…', 'aria-label': 'Notes' });
   notes.value = inst.notes;
   notes.addEventListener('input', debounce(() => void patchInstance(inst.id, { notes: notes.value }), 600));
+  wrap.appendChild(packUpdateCard(inst));
   wrap.appendChild(clientCard(inst));
   wrap.appendChild(card('Notes', null, notes));
   wrap.appendChild(card('Manage', null,
@@ -74,6 +77,9 @@ function overviewTab(inst: InstanceConfig): HTMLElement {
       await refreshInstances();
       navigate({ page: 'instance', id: copy.id, tab: 'overview' });
     } }, icon('copy', 16), 'Duplicate')),
+    row('Shortcut', 'Put an icon on your desktop or Start menu that opens the launcher and starts this instance straight away.', h('div', { style: { display: 'flex', gap: '8px' } },
+      h('button', { class: 'btn', type: 'button', onClick: async () => { const p = await attempt(() => api.createShortcut(inst.id, 'desktop')); if (p) toast('Desktop shortcut created.'); } }, icon('play', 16), 'Desktop'),
+      h('button', { class: 'btn', type: 'button', onClick: async () => { const p = await attempt(() => api.createShortcut(inst.id, 'startmenu')); if (p) toast('Added to the Start menu.'); } }, 'Start menu'))),
     row('Export', 'Save a .zip you can import into another Vox Launcher.', h('button', { class: 'btn', type: 'button', onClick: () => void exportFlow(inst) }, icon('download', 16), 'Export…')),
     row('Verify files on next launch', 'Re-checks and re-downloads game files, libraries and assets. Use this if the game will not start.',
       toggle(Boolean(inst.verifyNext), (v) => void patchInstance(inst.id, { verifyNext: v }))),
@@ -85,6 +91,68 @@ function overviewTab(inst: InstanceConfig): HTMLElement {
       }
     } }, icon('trash', 16), 'Delete'))));
   return wrap;
+}
+
+/** Shown only for instances installed from a Modrinth modpack that has a newer version. */
+function packUpdateCard(inst: InstanceConfig): HTMLElement {
+  const host = h('div', {});
+  void api.packUpdateCheck(inst.id).then((u) => {
+    if (!u) return;
+    host.appendChild(card('Modpack update available', `${u.current ? `You have ${u.current}. ` : ''}Version ${u.latest.versionNumber} is out.`,
+      h('p', { class: 'sub', style: { marginBottom: '12px' } }, 'Updating keeps your worlds, settings and any mods you added yourself. A snapshot is saved first so you can go back.'),
+      h('button', { class: 'btn primary', type: 'button', onClick: async () => {
+        if (!(await confirmDialog(`Update “${inst.name}” to ${u.latest.versionNumber}? Your worlds and settings are kept, and a snapshot is saved first.`, 'Update', false, 'Update modpack'))) return;
+        if (state.running.has(inst.id)) return toast('Close the game first.', true);
+        const out = await runTask(`Updating ${inst.name}`, (taskId) => api.packUpdate(inst.id, u.latest.id, taskId));
+        if (out) { toast(`Updated to ${u.latest.versionNumber}.`); await refreshInstances(); host.replaceChildren(); }
+      } }, icon('download', 16), `Update to ${u.latest.versionNumber}`)));
+  }).catch(() => undefined);
+  return host;
+}
+
+// ---- snapshots --------------------------------------------------------------------------------------
+
+function snapshotsTab(inst: InstanceConfig): HTMLElement {
+  const list = h('div', {}, spinner());
+  async function load(): Promise<void> {
+    const all = (await attempt(() => api.listSnapshots(inst.id))) ?? [];
+    if (all.length === 0) return list.replaceChildren(emptyState('clock', 'No snapshots yet', 'A snapshot saves your mods, mod settings and instance settings so you can go back if an update breaks something. Worlds are never changed.'));
+    list.replaceChildren(h('div', { class: 'list' }, all.map((sn) => h('div', { class: 'item' },
+      h('div', { class: 'item-icon' }, icon('clock', 18)),
+      h('div', { class: 'grow' }, h('div', { class: 'title' }, sn.name),
+        h('div', { class: 'sub' }, `${fmtDate(sn.created)} · ${sn.mods.length} mod${sn.mods.length === 1 ? '' : 's'} · Minecraft ${sn.mcVersion}${sn.loader === 'vanilla' ? '' : ` · ${sn.loader}`}`)),
+      h('div', { class: 'item-actions' },
+        h('button', { class: 'btn small', type: 'button', onClick: () => void diffDialog(sn) }, 'Compare'),
+        h('button', { class: 'btn small', type: 'button', onClick: async () => {
+          if (state.running.has(inst.id)) return toast('Close the game first.', true);
+          if (!(await confirmDialog(`Go back to “${sn.name}”? Your mods and mod settings return to how they were. Worlds are not changed. The current state is saved as a snapshot first, so you can undo this.`, 'Restore', false, 'Restore snapshot'))) return;
+          if (await attempt(() => api.restoreSnapshot(inst.id, sn.id))) { toast('Snapshot restored.'); await refreshInstances(); void load(); }
+        } }, icon('refresh', 14), 'Restore'),
+        iconButton('trash', `Delete ${sn.name}`, async () => {
+          if (!(await confirmDialog(`Delete the snapshot “${sn.name}”?`, 'Delete'))) return;
+          await attempt(() => api.deleteSnapshot(inst.id, sn.id));
+          void load();
+        }, true))))));
+  }
+  async function diffDialog(sn: import('../types').Snapshot): Promise<void> {
+    const now = (await attempt(() => api.listFiles(inst.id, 'mods'))) ?? [];
+    const cur = new Set(now.map((f) => (f.enabled ? f.name : `${f.name}.disabled`)));
+    const then = new Set(sn.mods);
+    const added = [...cur].filter((n) => !then.has(n));
+    const removed = [...then].filter((n) => !cur.has(n));
+    const section = (title: string, names: string[]) => names.length ? h('div', {}, h('h3', { class: 'dl-title' }, `${title} (${names.length})`), h('div', { class: 'conflict-files mono' }, names.join('\n'))) : null;
+    const m = openModal(h('div', { class: 'dlg' }, h('h2', {}, `Compared with “${sn.name}”`),
+      added.length + removed.length === 0 ? h('p', { class: 'dlg-text' }, 'The mods are the same as in this snapshot.') : h('div', {},
+        section('Added since then', added), section('Removed since then', removed)),
+      h('div', { class: 'dlg-actions' }, h('button', { class: 'btn', type: 'button', onClick: () => m.close() }, 'Close'))));
+  }
+  void load();
+  return h('div', {},
+    h('div', { class: 'toolbar' }, h('button', { class: 'btn primary', type: 'button', onClick: async () => {
+      const r = await formDialog('Save a snapshot', [{ key: 'name', label: 'Name', value: `Snapshot ${new Date().toLocaleDateString()}` }], 'Save', 'Saves the mods, mod settings and instance settings as they are now. Worlds are not included.');
+      if (!r) return;
+      if (await attempt(() => api.createSnapshot(inst.id, String(r.name)))) { toast('Snapshot saved.'); void load(); }
+    } }, icon('plus', 16), 'New snapshot')), list);
 }
 
 async function exportFlow(inst: InstanceConfig): Promise<void> {
@@ -238,6 +306,7 @@ function serversTab(inst: InstanceConfig): HTMLElement {
       s.icon ? h('img', { class: 'item-icon', src: `data:image/png;base64,${s.icon}`, alt: '' }) : h('div', { class: 'item-icon' }, icon('server', 18)),
       h('div', { class: 'grow' }, h('div', { class: 'title' }, s.name), h('div', { class: 'sub mono' }, s.ip)),
       h('div', { class: 'item-actions' },
+        h('button', { class: 'btn small', type: 'button', title: 'Start the game and join this server', onClick: () => void launch(inst.id, { server: s.ip }) }, icon('play', 14), 'Join'),
         iconButton('edit', `Edit ${s.name}`, async () => {
           const r = await formDialog('Edit server', [{ key: 'name', label: 'Name', value: s.name }, { key: 'ip', label: 'Address', value: s.ip }], 'Save');
           if (!r || !String(r.ip).trim()) return;
@@ -324,6 +393,18 @@ function settingsTab(inst: InstanceConfig): HTMLElement {
     row('Display mode', null, select(fsOptions, inst.fullscreen === null ? 'default' : inst.fullscreen ? 'on' : 'off', (v) => save({ fullscreen: v === 'default' ? null : v === 'on' }))),
     row('Window width', null, num(inst.width, 'width', 'Default')), row('Window height', null, num(inst.height, 'height', 'Default')),
     field('Extra game arguments', text(inst.extraGameArgs, 'extraGameArgs', 'e.g. --quickPlayMultiplayer play.example.com', true))));
+
+  const joinCard = card('Quick join', 'Start the game and go straight into a server or world. Needs Minecraft 1.20 or newer for worlds; servers also work on older versions.',
+    field('Server', text(inst.joinServer, 'joinServer', 'e.g. play.example.com or play.example.com:25566'), 'Leave empty to start at the title screen.'));
+  const worldSel = select([{ value: '', label: 'None' }], inst.joinWorld, (v) => save({ joinWorld: v }));
+  joinCard.appendChild(row('World', 'Used when no server is set.', worldSel));
+  void attempt(() => api.listWorlds(inst.id)).then((ws) => {
+    const names = (ws ?? []).map((w) => w.folder);
+    if (inst.joinWorld && !names.includes(inst.joinWorld)) names.unshift(inst.joinWorld);
+    worldSel.replaceChildren(...[{ value: '', label: 'None' }, ...names.map((n) => ({ value: n, label: n }))].map((o) => h('option', { value: o.value }, o.label)));
+    worldSel.value = inst.joinWorld;
+  });
+  wrap.appendChild(joinCard);
 
   wrap.appendChild(card('Custom commands', 'Variables available: INST_ID, INST_NAME, INST_DIR, INST_MC_DIR, INST_MC_VER, INST_LOADER.',
     field('Wrapper command', text(inst.wrapper, 'wrapper', 'e.g. gamemoderun'), 'Placed in front of the java command.'),
