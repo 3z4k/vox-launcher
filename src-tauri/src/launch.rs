@@ -367,7 +367,6 @@ pub async fn run_shell(command: &str, cwd: &std::path::Path, a: &[(String, Strin
         c
     };
     cmd.current_dir(cwd).envs(a.iter().cloned()).envs(b.iter().cloned()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
-    hide_window(&mut cmd);
     let status = tokio::time::timeout(std::time::Duration::from_secs(300), cmd.status()).await.map_err(|_| anyhow::anyhow!("The command took too long (over 5 minutes)."))??;
     Ok(status.code())
 }

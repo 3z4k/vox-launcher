@@ -502,7 +502,9 @@ mod tests {
     use std::io::Write;
 
     fn ctx() -> Ctx {
-        Ctx::new(std::env::temp_dir().join(format!("vox-content-{}-{}", std::process::id(), now_ms())))
+        static CTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ctx::new(std::env::temp_dir().join(format!("vox-content-{}-{}-{}", std::process::id(), now_ms(), id)))
     }
     fn game(c: &Ctx) -> PathBuf {
         let g = c.game_dir("inst-1");

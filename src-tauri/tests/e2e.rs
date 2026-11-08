@@ -124,8 +124,8 @@ async fn full_launch_against_a_fake_mojang_then_a_warm_relaunch_does_no_network(
         "downloads": { "client": { "sha1": sha1_hex(&client_jar), "size": client_jar.len(), "url": format!("{base}/client.jar") } },
         "libraries": [
             { "name": "com.example:lib:1.0", "downloads": { "artifact": { "path": "com/example/lib/1.0/lib-1.0.jar", "sha1": sha1_hex(&lib_jar), "size": lib_jar.len(), "url": format!("{base}/lib.jar") } } },
-            { "name": "com.example:lib:1.0:natives-linux", "rules": [{ "action": "allow", "os": { "name": "linux" } }],
-              "downloads": { "artifact": { "path": "com/example/lib/1.0/lib-1.0-natives-linux.jar", "sha1": sha1_hex(&natives_jar), "size": natives_jar.len(), "url": format!("{base}/natives.jar") } } }
+            { "name": "com.example:lib:1.0:natives-test",
+              "downloads": { "artifact": { "path": "com/example/lib/1.0/lib-1.0-natives-test.jar", "sha1": sha1_hex(&natives_jar), "size": natives_jar.len(), "url": format!("{base}/natives.jar") } } }
         ],
         "arguments": {
             "game": ["--username", "${auth_player_name}", "--version", "${version_name}", "--assetsDir", "${assets_root}", "--assetIndex", "${assets_index_name}"],

@@ -765,7 +765,7 @@ async fn install_launcher_update(app: AppHandle, s: S<'_>, url: String, name: St
         let repo = repo_of(&s.ctx).await;
         task_report(&app, task_id)("Downloading update", 0, 1);
         let path = update::download_installer(&s.ctx, &repo, &url, &name, size).await.map_err(err)?;
-        std::process::Command::new(&path).spawn().map_err(|e| format!("Could not start the installer: {e}"))?;
+        open::that(&path).map_err(|e| format!("Could not start the installer: {e}"))?;
         let app2 = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
